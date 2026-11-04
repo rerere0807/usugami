@@ -1,0 +1,29 @@
+:root { color-scheme: dark; font-family: "Yu Gothic UI", system-ui, sans-serif; background: #10141c; color: #e6eaf2; }
+body { margin: 0; min-width: 380px; }
+main { padding: 22px 24px 18px; max-width: 520px; margin: auto; }
+header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+header img { border-radius: 8px; }
+.eyebrow { color: #7aa2ff; letter-spacing: 1.5px; font-size: 10.5px; font-weight: 700; }
+h1 { font-size: 19px; margin: 2px 0 0; }
+p { line-height: 1.7; font-size: 13px; margin: 0; }
+.status { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 1px solid #2a3140; border-radius: 12px; background: #151a23; margin-bottom: 16px; }
+.status strong { font-size: 13.5px; }
+.status p { color: #8b95a7; font-size: 12px; margin-top: 2px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 5px; flex: none; background: #8b95a7; }
+.status[data-state="ok"] .dot { background: #34d399; box-shadow: 0 0 0 4px rgba(52, 211, 153, .15); }
+.status[data-state="error"] .dot { background: #f59e0b; }
+.status[data-state="badkey"] .dot, .status[data-state="nokey"] .dot, .status[data-state="storage"] .dot { background: #f87171; }
+label { display: block; font-size: 12px; color: #8b95a7; margin-bottom: 6px; }
+.field { display: flex; gap: 6px; }
+input { box-sizing: border-box; flex: 1; min-width: 0; background: #0b0f17; border: 1px solid #2f3848; border-radius: 8px; color: white; padding: 10px 12px; font: 13px Consolas, "Yu Gothic UI", monospace; }
+input:focus { outline: 2px solid #4f7dfa; outline-offset: -1px; }
+button { padding: 10px 14px; background: #4f7df3; border: 0; color: white; border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer; }
+button:hover { background: #6390ff; }
+button:focus-visible { outline: 2px solid #a5c0ff; outline-offset: 2px; }
+form > button { width: 100%; margin-top: 10px; }
+button.ghost { background: #222a38; color: #c9d1de; }
+button.ghost:hover { background: #2c3546; }
+#message { min-height: 22px; margin: 8px 0 4px; font-size: 12.5px; color: #78dec4; }
+#message.error { color: #f87171; }
+.steps { margin: 0 0 12px; padding-left: 20px; font-size: 12.5px; line-height: 1.8; color: #c9d1de; }
+.hint { color: #8b95a7; font-size: 11.5px; }

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Usugami 接続設定</title><link rel="stylesheet" href="options.css"></head>
+<body>
+  <main>
+    <header>
+      <img src="icons/icon-48.png" alt="" width="32" height="32">
+      <div><div class="eyebrow">USUGAMI · BROWSER BRIDGE</div><h1>ページ追従の接続</h1></div>
+    </header>
+    <section class="status" id="statusCard" data-state="idle" aria-live="polite">
+      <span class="dot"></span>
+      <div><strong id="stateTitle">確認中…</strong><p id="stateDetail"></p></div>
+    </section>
+    <form id="settings">
+      <label for="key">接続キー</label>
+      <div class="field">
+        <input id="key" type="password" autocomplete="off" spellcheck="false" maxlength="40" placeholder="Usugami でコピーした32文字のキー" required>
+        <button type="button" id="reveal" class="ghost" aria-pressed="false">表示</button>
+      </div>
+      <button type="submit">保存して接続</button>
+    </form>
+    <p id="message" role="status"></p>
+    <ol class="steps">
+      <li>Usugami のツールバーで「接続キーをコピー」を押す</li>
+      <li>上の欄に貼り付けて「保存して接続」</li>
+      <li>Usugami の「ページ追従」をON。書き込んだら Ctrl+Alt+A で操作モードにしてスクロール</li>
+    </ol>
+    <p class="hint">接続キーは Usugami を再起動しても変わりません（Usugami で再発行したときだけ設定し直します）。送信先はこの PC 内の 127.0.0.1 だけで、ページ本文・URL・画像は送信しません。拡張を追加した直後は、対象のページを再読み込みしてください。</p>
+  </main>
+  <script src="options.js"></script>
+</body></html>

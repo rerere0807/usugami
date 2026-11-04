@@ -1,0 +1,29 @@
+# Build output
+dist/
+obj/
+*.zip
+
+# Temporary files
+*.tmp
+self-test.txt
+test-document.*
+
+# Local credentials, signing keys and user documents
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+settings.xml
+*.usugami
+*.layer
+
+# Editor / OS state
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
