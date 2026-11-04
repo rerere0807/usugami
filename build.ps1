@@ -128,7 +128,8 @@ if ($Package) {
         }
     } finally { $archive.Dispose() }
     $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-    [System.IO.File]::WriteAllText($checksum, "$hash  Usugami-windows.zip`r`n", [System.Text.Encoding]::ASCII)
+    # LF, as sha256sum -c on macOS/Linux reads a CR as part of the file name.
+    [System.IO.File]::WriteAllText($checksum, "$hash  Usugami-windows.zip`n", [System.Text.Encoding]::ASCII)
     Write-Host "Packaged: $zip"
     Write-Host "SHA-256: $checksum"
 }
