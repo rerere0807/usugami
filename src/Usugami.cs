@@ -703,12 +703,25 @@ namespace Usugami {
 
     class Settings {
         public string Key; public double Left = double.NaN, Top = double.NaN, Width = 4; public Color Color = Color.FromRgb(0xF4, 0x3F, 0x5E); public bool Compact;
+        // The file exists but stayed locked or denied: its key may still be the one the extension holds, so it must not be overwritten.
+        public bool Unreadable;
         // An explicit override supports isolated smoke tests without touching a user's recovery files.
         static readonly string dataDirectory = Environment.GetEnvironmentVariable("USUGAMI_DATA_DIR");
         public static string Folder { get { return string.IsNullOrWhiteSpace(dataDirectory) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Usugami") : Path.GetFullPath(dataDirectory); } }
         public static bool ValidKey(string key) { return key != null && Regex.IsMatch(key, @"\A[a-f0-9]{32}\z"); }
         public static string NewKey() { var bytes = new byte[16]; using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(bytes); return string.Concat(bytes.Select(b => b.ToString("x2"))); }
         public static Settings Load(string path) {
+            // Another program (antivirus, backup, sync) can hold the file briefly; retry before giving up.
+            for (int attempt = 0; ; attempt++) {
+                try { return Read(path); }
+                catch (Exception e) {
+                    if (!(e is IOException || e is UnauthorizedAccessException)) throw;
+                    if (attempt >= 4) return new Settings { Unreadable = true };
+                    Thread.Sleep(250);
+                }
+            }
+        }
+        static Settings Read(string path) {
             var s = new Settings();
             try {
                 if (!File.Exists(path)) return s;
@@ -719,7 +732,7 @@ namespace Usugami {
                 s.Width = Math.Max(1, Math.Min(24, Read(root, "width", 4)));
                 var color = (string)root.Attribute("color"); if (color != null) s.Color = Scene.ParseColor(color);
                 s.Compact = (string)root.Attribute("compact") == "true";
-            } catch (Exception) { return new Settings(); }
+            } catch (Exception e) { if (e is IOException || e is UnauthorizedAccessException) throw; return new Settings(); }
             return s;
         }
         static double Read(XElement e, string name, double fallback) { double n; return double.TryParse((string)e.Attribute(name), NumberStyles.Float, CultureInfo.InvariantCulture, out n) && !double.IsInfinity(n) && !double.IsNaN(n) && Math.Abs(n) <= 1e9 ? n : fallback; }
@@ -736,7 +749,7 @@ namespace Usugami {
         Button mode, undoButton, redoButton, compactButton, miniButton, miniMode, customSwatch; Panel extra, toolsRow; DockPanel header; Slider widthSlider;
         readonly Dictionary<Tool, Button> toolButtons = new Dictionary<Tool, Button>();
         readonly List<KeyValuePair<Color, Button>> swatches = new List<KeyValuePair<Color, Button>>();
-        public bool Drawing = false, Follow; bool visible = true, exiting, drawKeys, mini, recoveryChecked, backupFailed; int modal, ticks;
+        public bool Drawing = false, Follow; bool visible = true, exiting, drawKeys, mini, recoveryChecked, backupFailed; int modal, ticks; string settingsWarning;
         IntPtr overlayHandle, barHandle; Forms.NotifyIcon tray; Bridge bridge;
         DispatcherTimer statusTimer; string notice = ""; DateTime noticeUntil; string file;
         readonly ScrollFollower follower = new ScrollFollower();
@@ -753,7 +766,8 @@ namespace Usugami {
             settingsPath = Path.Combine(Settings.Folder, "settings.xml");
             settings = Settings.Load(settingsPath);
             // The connection key survives restarts so the browser extension stays paired.
-            if (!Settings.ValidKey(settings.Key)) { settings.Key = Settings.NewKey(); SaveSettings(); }
+            if (!Settings.ValidKey(settings.Key)) { settings.Key = Settings.NewKey(); if (!settings.Unreadable) SaveSettings(); }
+            if (settings.Unreadable) settingsWarning = "設定ファイルを読み込めなかったため、今回だけの接続キーを使っています。拡張機能とつながらない場合は Usugami を再起動してください";
             token = settings.Key;
             app.Resources = Theme.Load();
             overlay = new Window { Title = "Usugami Canvas", WindowStyle = WindowStyle.None, AllowsTransparency = true, Background = Brushes.Transparent, ResizeMode = ResizeMode.NoResize, Topmost = true, ShowInTaskbar = false, ShowActivated = false };
@@ -788,6 +802,7 @@ namespace Usugami {
             statusTimer.Tick += delegate { Tick(); }; statusTimer.Start();
             SystemEvents.DisplaySettingsChanged += DisplayChanged;
             UpdateTray(); UpdateStatus();
+            if (settingsWarning != null) { Toast(settingsWarning); tray.ShowBalloonTip(8000, "Usugami — 設定", settingsWarning, Forms.ToolTipIcon.Warning); settingsWarning = null; }
             app.Dispatcher.BeginInvoke(new Action(delegate {
                 // Ask about unsaved work first, even when started with a document; otherwise the recovery copy is silently discarded.
                 if (!OfferRecovery(startupFile) && startupFile != null) Run(delegate { Scene.Load(startupFile); file = startupFile; surface.InvalidateVisual(); });
@@ -1314,7 +1329,8 @@ namespace Usugami {
         void CopyKey() { CopyText(token); Toast("接続キーをコピーしました。拡張機能の設定に貼り付けてください"); }
         void RegenerateKey() {
             if (Modal(() => MessageBox.Show(bar, "接続キーを再発行しますか？\n拡張機能側にも新しいキーを設定し直す必要があります。", "Usugami", MessageBoxButton.OKCancel, MessageBoxImage.Question)) != MessageBoxResult.OK) return;
-            settings.Key = token = Settings.NewKey(); bridge.Token = token; SaveSettings();
+            // An explicit reissue is persisted even over a settings file that could not be read at start.
+            settings.Unreadable = false; settings.Key = token = Settings.NewKey(); bridge.Token = token; SaveSettings();
             CopyText(token); Toast("新しい接続キーを発行してコピーしました。拡張機能に貼り付けてください");
         }
         void ToggleFollow() {
@@ -1400,12 +1416,20 @@ namespace Usugami {
                 }
             } catch (Exception) { return null; }
         }
-        void SaveSettings() {
-            try {
-                if (bar != null) { settings.Left = bar.Left; settings.Top = bar.Top; }
-                if (surface != null) { settings.Color = surface.Color; settings.Width = surface.PenWidth; }
-                settings.Save(settingsPath);
-            } catch (Exception) { }
+        // Returns false when the settings could not be written; the user is told, since a lost key breaks the browser link on the next start.
+        bool SaveSettings() {
+            if (settings.Unreadable) return false;
+            if (bar != null) { settings.Left = bar.Left; settings.Top = bar.Top; }
+            if (surface != null) { settings.Color = surface.Color; settings.Width = surface.PenWidth; }
+            Exception error = null;
+            for (int attempt = 0; attempt < 3; attempt++) {
+                try { settings.Save(settingsPath); return true; }
+                catch (Exception e) { error = e; Thread.Sleep(200); }
+            }
+            string text = "設定を保存できませんでした（" + error.Message.Trim() + "）。接続キーやツールバーの位置が次回に引き継がれない可能性があります";
+            if (exiting && bar != null) MessageBox.Show(bar, text, "Usugami", MessageBoxButton.OK, MessageBoxImage.Warning);
+            else { settingsWarning = text; if (status != null) { Toast(text); settingsWarning = null; } if (tray != null) tray.ShowBalloonTip(8000, "Usugami — 設定", text, Forms.ToolTipIcon.Warning); }
+            return false;
         }
         void Exit() {
             if (exiting || !SaveIfNeeded()) return;
@@ -1474,9 +1498,9 @@ namespace Usugami {
         }
         void Handle(TcpClient client) {
             using (client) {
+                var deadline = Stopwatch.StartNew();
                 try {
                     client.ReceiveTimeout = RequestTimeout; client.SendTimeout = RequestTimeout;
-                    var deadline = Stopwatch.StartNew();
                     var stream = client.GetStream(); var bytes = new List<byte>(); int c;
                     bool complete = false;
                     while (bytes.Count < 8192) {
@@ -1515,6 +1539,7 @@ namespace Usugami {
                     if (!Running || !SameSecret(key, token)) { Respond(stream, "403 Forbidden"); return; }
                     Interlocked.Exchange(ref lastSeenTicks, DateTime.UtcNow.Ticks); receive(message); Respond(stream, "204 No Content");
                 } catch (Exception e) { if (!(e is IOException || e is SocketException || e is SerializationException || e is ObjectDisposedException || e is XmlException || e is ArgumentException || e is InvalidCastException)) Debug.WriteLine(e); }
+                finally { CloseGracefully(client, deadline); }
             }
         }
         static void SetReadTimeout(TcpClient client, Stopwatch deadline) {
@@ -1523,6 +1548,19 @@ namespace Usugami {
             client.ReceiveTimeout = (int)remaining;
         }
         static bool Finite(double n) { return !double.IsNaN(n) && !double.IsInfinity(n) && Math.Abs(n) < 1e9; }
+        // Rejections reply before reading the body. Closing a socket with unread input makes Windows send RST,
+        // which can discard the reply before the client reads it: the extension then saw "Usugami not found"
+        // instead of "wrong key". Half-close and drain the rest so the reply always arrives.
+        static void CloseGracefully(TcpClient client, Stopwatch deadline) {
+            try {
+                client.Client.Shutdown(SocketShutdown.Send);
+                var sink = new byte[1024]; var stream = client.GetStream();
+                for (int total = 0; total < 16384 && deadline.ElapsedMilliseconds < RequestTimeout; ) {
+                    SetReadTimeout(client, deadline); int read = stream.Read(sink, 0, sink.Length);
+                    if (read <= 0) break; total += read;
+                }
+            } catch (Exception e) { if (!(e is IOException || e is SocketException || e is ObjectDisposedException || e is InvalidOperationException)) Debug.WriteLine(e); }
+        }
         static void Respond(Stream stream, string status) { var bytes = Encoding.ASCII.GetBytes("HTTP/1.1 " + status + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); stream.Write(bytes, 0, bytes.Length); }
     }
     static class Native {
@@ -1640,6 +1678,10 @@ namespace Usugami {
                     new Settings { Key = key, Left = 120.5, Top = 40, Width = 7, Color = Colors.Teal, Compact = true }.Save(settingsPath);
                     var s = Settings.Load(settingsPath); Require(s.Key == key && s.Left == 120.5 && s.Top == 40 && s.Width == 7 && s.Color == Colors.Teal && s.Compact, "settings round trip");
                     File.WriteAllText(settingsPath, "garbage"); s = Settings.Load(settingsPath); Require(s.Key == null && double.IsNaN(s.Left), "corrupt settings fall back to defaults");
+                    new Settings { Key = key }.Save(settingsPath);
+                    using (new FileStream(settingsPath, FileMode.Open, FileAccess.Read, FileShare.None)) { s = Settings.Load(settingsPath); }
+                    Require(s.Unreadable && s.Key == null, "locked settings are reported, not replaced");
+                    s = Settings.Load(settingsPath); Require(!s.Unreadable && s.Key == key, "settings read once the lock is released");
                     File.WriteAllText(settingsPath, "<settings width=\"NaN\" left=\"Infinity\" top=\"1e300\"/>"); s = Settings.Load(settingsPath);
                     Require(s.Width == 4 && double.IsNaN(s.Left) && double.IsNaN(s.Top), "nonfinite and extreme settings rejected");
                     Require(!Settings.ValidKey(key + "\n"), "connection key must match the entire string");
@@ -1711,6 +1753,7 @@ namespace Usugami {
                     Require(RawStatus(port, Request(port, "new-key", json).Replace("Content-Type: application/json\r\n", "")) == 400, "missing content type rejected");
                     Require(RawStatus(port, Request(port, "new-key", json).Replace("POST /scroll", "OPTIONS /scroll")) == 403, "CORS preflight rejected");
                     Require(RawStatus(port, Request(port, "new-key", json.Replace("\"x\":0,", ""))) == 400, "missing JSON member rejected");
+                    Require(LateReadStatus(port, Request(port, "wrong-key", json)) == 403, "rejected reply survives a client that reads late");
                     Require(RawStatus(port, Request(port, "new-key", json.Replace("\"x\":0,", "\"x\":0,\"x\":1,"))) == 400, "duplicate JSON member rejected");
                     Require(RawStatus(port, Request(port, "new-key", json + " trailing")) == 400, "trailing JSON data rejected");
                     Require(RawStatus(port, Request(port, "new-key", "{")) == 403, "invalid body length rejected");
@@ -1726,6 +1769,16 @@ namespace Usugami {
             return "POST /scroll HTTP/1.1\r\nHost: 127.0.0.1:" + port + "\r\nX-Usugami-Key: " + key + "\r\nContent-Type: application/json\r\nContent-Length: " + Encoding.UTF8.GetByteCount(json) + "\r\n" + extra + "\r\n" + json;
         }
         static string Request(int port, string key, string json) { return Request(port, key, json, ""); }
+        // Reads only after the server has replied and closed: an RST on close would have discarded the reply.
+        static int LateReadStatus(int port, string request) {
+            using (var client = new TcpClient()) {
+                client.Connect(IPAddress.Loopback, port); client.ReceiveTimeout = 3000;
+                var bytes = Encoding.UTF8.GetBytes(request); var stream = client.GetStream(); stream.Write(bytes, 0, bytes.Length);
+                Thread.Sleep(400);
+                try { using (var reader = new StreamReader(stream, Encoding.ASCII)) { var line = reader.ReadLine(); return line == null ? 0 : int.Parse(line.Split(' ')[1], CultureInfo.InvariantCulture); } }
+                catch (IOException) { return -1; }
+            }
+        }
         static int RawStatus(int port, string request) {
             using (var client = new TcpClient()) {
                 client.Connect(IPAddress.Loopback, port); client.ReceiveTimeout = 3000; client.SendTimeout = 3000;

@@ -10,7 +10,8 @@ const states = {
   badkey: ["接続キーが一致しません", "Usugami で「接続キーをコピー」し、貼り付け直してください。"],
   nokey: ["接続キーが未設定です", "Usugami の「接続キーをコピー」で取得したキーを貼り付けてください。"],
   storage: ["接続キーを読み書きできません", "ブラウザーを最新版に更新し、拡張機能を再読み込みしてください。"],
-  idle: ["待機中", "HTTP/HTTPS のページを表示すると自動で接続します。"]
+  // Tabs opened before the extension was added, reloaded or updated have no content script until they are reloaded.
+  idle: ["待機中", "HTTP/HTTPS のページを表示すると自動で接続します。ページを表示していても待機中のままなら、そのページを再読み込み（F5）してください。拡張機能の追加・更新の直後は、開いていたタブの再読み込みが必要です。"]
 };
 const valid = value => typeof value === "string" && value.length === 32 && /^[a-f0-9]{32}$/.test(value);
 
