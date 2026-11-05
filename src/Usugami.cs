@@ -199,6 +199,78 @@ namespace Usugami {
             } finally { if (File.Exists(temp)) File.Delete(temp); }
         }
     }
+    // "Save the screen": the monitor as the user sees it, annotations included, as PNG or a one-page PDF.
+    static class ScreenShot {
+        [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr window);
+        [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr window, IntPtr dc);
+        [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr dest, int x, int y, int width, int height, IntPtr source, int sourceX, int sourceY, uint operation);
+        // CAPTUREBLT includes layered windows, which is what the transparent drawing overlay is.
+        // BitBlt directly: .NET Framework's CopyFromScreen rejects SourceCopy | CaptureBlt as an invalid enum value.
+        public static System.Drawing.Bitmap Capture(System.Drawing.Rectangle bounds) {
+            var bitmap = new System.Drawing.Bitmap(bounds.Width, bounds.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            try {
+                using (var g = System.Drawing.Graphics.FromImage(bitmap)) {
+                    IntPtr dest = g.GetHdc(), screen = GetDC(IntPtr.Zero);
+                    try { if (screen == IntPtr.Zero || !BitBlt(dest, 0, 0, bounds.Width, bounds.Height, screen, bounds.X, bounds.Y, 0x00CC0020 | 0x40000000)) throw new InvalidOperationException("画面を取り込めませんでした。"); }
+                    finally { if (screen != IntPtr.Zero) ReleaseDC(IntPtr.Zero, screen); g.ReleaseHdc(dest); }
+                }
+                return bitmap;
+            } catch { bitmap.Dispose(); throw; }
+        }
+        public static byte[] Png(System.Drawing.Bitmap bitmap) { using (var memory = new MemoryStream()) { bitmap.Save(memory, System.Drawing.Imaging.ImageFormat.Png); return memory.ToArray(); } }
+        // Rows of R,G,B bytes without padding, as a PDF DeviceRGB image expects.
+        public static byte[] Rgb(System.Drawing.Bitmap bitmap) {
+            var rect = new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height);
+            var data = bitmap.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            try {
+                var row = new byte[Math.Abs(data.Stride)]; var rgb = new byte[bitmap.Width * bitmap.Height * 3];
+                for (int y = 0; y < bitmap.Height; y++) {
+                    Marshal.Copy(data.Scan0 + y * data.Stride, row, 0, row.Length);
+                    for (int x = 0, o = y * bitmap.Width * 3; x < bitmap.Width; x++, o += 3) { rgb[o] = row[x * 3 + 2]; rgb[o + 1] = row[x * 3 + 1]; rgb[o + 2] = row[x * 3]; }
+                }
+                return rgb;
+            } finally { bitmap.UnlockBits(data); }
+        }
+        // A single page holding one lossless (Flate) RGB image, scaled to fit A4 in the image's orientation for printing.
+        // Only numbers and fixed names are written, so nothing from the screen or file name can alter the PDF structure.
+        public static byte[] Pdf(int width, int height, byte[] rgb) {
+            if (width <= 0 || height <= 0 || rgb.Length != (long)width * height * 3) throw new ArgumentException("画像の大きさが不正です。");
+            double longSide = 842, shortSide = 595;
+            double scale = width >= height ? Math.Min(longSide / width, shortSide / height) : Math.Min(shortSide / width, longSide / height);
+            string w = (width * scale).ToString("0.##", CultureInfo.InvariantCulture), h = (height * scale).ToString("0.##", CultureInfo.InvariantCulture);
+            byte[] image = Zlib(rgb), content = Encoding.ASCII.GetBytes("q " + w + " 0 0 " + h + " 0 0 cm /Im0 Do Q");
+            var output = new MemoryStream(); var offsets = new List<long>();
+            Action<string> text = t => { var b = Encoding.ASCII.GetBytes(t); output.Write(b, 0, b.Length); };
+            Action<string, byte[]> obj = (head, stream) => {
+                offsets.Add(output.Position); text(offsets.Count + " 0 obj\n" + head);
+                if (stream != null) { text("\nstream\n"); output.Write(stream, 0, stream.Length); text("\nendstream"); }
+                text("\nendobj\n");
+            };
+            text("%PDF-1.4\n");
+            obj("<< /Type /Catalog /Pages 2 0 R >>", null);
+            obj("<< /Type /Pages /Kids [3 0 R] /Count 1 >>", null);
+            obj("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 " + w + " " + h + "] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>", null);
+            obj("<< /Length " + content.Length + " >>", content);
+            obj("<< /Type /XObject /Subtype /Image /Width " + width + " /Height " + height + " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length " + image.Length + " >>", image);
+            long xref = output.Position;
+            text("xref\n0 " + (offsets.Count + 1) + "\n0000000000 65535 f \n");
+            foreach (var offset in offsets) text(offset.ToString("D10", CultureInfo.InvariantCulture) + " 00000 n \n");
+            text("trailer\n<< /Size " + (offsets.Count + 1) + " /Root 1 0 R >>\nstartxref\n" + xref + "\n%%EOF\n");
+            return output.ToArray();
+        }
+        // FlateDecode expects the zlib wrapper (header and Adler-32) around .NET's raw deflate stream.
+        public static byte[] Zlib(byte[] data) {
+            using (var memory = new MemoryStream()) {
+                memory.WriteByte(0x78); memory.WriteByte(0x9C);
+                using (var deflate = new System.IO.Compression.DeflateStream(memory, System.IO.Compression.CompressionLevel.Optimal, true)) deflate.Write(data, 0, data.Length);
+                uint a = 1, b = 0;
+                foreach (byte value in data) { a = (a + value) % 65521; b = (b + a) % 65521; }
+                uint adler = (b << 16) | a;
+                memory.WriteByte((byte)(adler >> 24)); memory.WriteByte((byte)(adler >> 16)); memory.WriteByte((byte)(adler >> 8)); memory.WriteByte((byte)adler);
+                return memory.ToArray();
+            }
+        }
+    }
     static class Pictures {
         public const int MaxSide = 20000, MaxBytes = 64 * 1024 * 1024; public const long MaxPixels = 100000000;
         static readonly byte[] PngSignature = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
@@ -573,6 +645,7 @@ namespace Usugami {
             { "save", "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8" },
             { "folder", "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-0.9L9.6 3.9A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z" },
             { "download", "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5l5-5 M12 15V3" },
+            { "monitor", "M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z M8 21h8 M12 17v4" },
             { "copy", "M10 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2z M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2" },
             { "clear", "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z M9 9l6 6 M15 9l-6 6" },
             { "target", "M12 2v4 M12 18v4 M2 12h4 M18 12h4 M12 17a5 5 0 1 0 0-10a5 5 0 0 0 0 10z" },
@@ -899,7 +972,8 @@ namespace Usugami {
             Sep(actions);
             Act(actions, "save", "保存", delegate { Save(Native.IsDown(0x10)); }, "上書き保存（描画中 Ctrl+S）\nShift+クリックで名前を付けて保存");
             Act(actions, "folder", "開く", Open, ".usugami ファイルを開く");
-            Act(actions, "download", "PNG", Export, "書き込み全体を透明PNGで書き出す");
+            Act(actions, "download", "PNG", Export, "書き込みだけを透明PNGで書き出す（下の画面は含みません）");
+            Act(actions, "monitor", "画面保存", SaveScreen, "下の画面と書き込みをまとめて PNG または PDF で保存\n（ツールバーのある画面が対象。保存中はツールバーを隠します）");
             Act(actions, "copy", "コピー", CopyImage, "書き込み全体を画像としてクリップボードへ");
             Sep(actions);
             Act(actions, "clear", "全消去", Clear, "すべて消去（元に戻せます）");
@@ -1308,6 +1382,32 @@ namespace Usugami {
             return target;
         }
         static byte[] Png(BitmapSource bitmap) { var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap)); using (var memory = new MemoryStream()) { encoder.Save(memory); return memory.ToArray(); } }
+        void SaveScreen() {
+            if (barHandle == IntPtr.Zero) return;
+            var monitor = Forms.Screen.FromHandle(barHandle).Bounds;
+            var dialog = new SaveFileDialog { Filter = "PNG 画像|*.png|PDF|*.pdf", DefaultExt = ".png", AddExtension = true, FileName = (file == null ? "画面" : Path.GetFileNameWithoutExtension(file)) + ".png" };
+            if (Modal(() => dialog.ShowDialog(bar)) != true) return;
+            string path = dialog.FileName;
+            bool pdf = Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
+            // Hide everything of ours except the drawing, and give the screen time to repaint where the dialog was.
+            bool helpOpen = help != null && help.IsVisible;
+            bar.Hide(); if (helpOpen) help.Hide();
+            var wait = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(400) };
+            wait.Tick += delegate {
+                wait.Stop();
+                byte[] bytes = null; Exception error = null;
+                try { using (var shot = ScreenShot.Capture(monitor)) bytes = pdf ? ScreenShot.Pdf(shot.Width, shot.Height, ScreenShot.Rgb(shot)) : ScreenShot.Png(shot); }
+                catch (Exception e) { error = e; }
+                ShowToolbar(); if (helpOpen && help != null) help.Show();
+                try {
+                    if (error != null) throw error;
+                    File.WriteAllBytes(path, bytes);
+                    Toast("画面を" + (pdf ? " PDF " : " PNG ") + "で保存しました: " + Path.GetFileName(path));
+                } catch (Exception e) { ShowError(e); }
+                UpdateStatus();
+            };
+            wait.Start();
+        }
         void Export() {
             var image = RenderContent(false); if (image == null) { Toast("書き出す書き込みがありません"); return; }
             var dialog = new SaveFileDialog { Filter = "透明PNG|*.png", DefaultExt = ".png", FileName = (file == null ? "書き込み" : Path.GetFileNameWithoutExtension(file)) + ".png" };
@@ -1666,6 +1766,7 @@ namespace Usugami {
                     Require(Pictures.EncodedSize(big) > 0, "embedded PNG size estimate");
                     var placed = new List<Item> { new ImageItem { Bitmap = big, EncodedBytes = 1000 } };
                     Require(Pictures.PixelRoom(placed) == Pictures.MaxPixels - 120000 && Pictures.ByteRoom(placed) == (Scene.MaxDocumentBytes * 95L / 100 - 200 - 1336) * 3 / 4, "room left for new images");
+                    TestScreenShot();
                     File.WriteAllText(path, "<layer version=\"1\" x=\"0\" y=\"0\" zoom=\"1\"><stroke color=\"#FF00FF00\" width=\"2\" marker=\"false\">0,0,1 5,5,1</stroke></layer>");
                     loaded.Remember(); loaded.Load(path);
                     Require(loaded.Items.Count == 1 && ((StrokeItem)loaded.Items[0]).Color == Colors.Lime && !loaded.CanUndo && !loaded.Dirty, "legacy file opens with a fresh history");
@@ -1770,6 +1871,40 @@ namespace Usugami {
         }
         static string Request(int port, string key, string json) { return Request(port, key, json, ""); }
         // Reads only after the server has replied and closed: an RST on close would have discarded the reply.
+        static void TestScreenShot() {
+            // BGR rows with padding become tight RGB rows.
+            using (var bitmap = new System.Drawing.Bitmap(3, 2, System.Drawing.Imaging.PixelFormat.Format24bppRgb)) {
+                bitmap.SetPixel(0, 0, System.Drawing.Color.FromArgb(10, 20, 30)); bitmap.SetPixel(2, 1, System.Drawing.Color.FromArgb(200, 150, 100));
+                var rgb = ScreenShot.Rgb(bitmap);
+                Require(rgb.Length == 18 && rgb[0] == 10 && rgb[1] == 20 && rgb[2] == 30 && rgb[15] == 200 && rgb[16] == 150 && rgb[17] == 100, "screen capture RGB rows");
+                Require(ScreenShot.Png(bitmap).Take(8).SequenceEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }), "screen capture PNG");
+            }
+            var pixels = new byte[640 * 360 * 3]; new Random(5).NextBytes(pixels);
+            var pdf = ScreenShot.Pdf(640, 360, pixels);
+            string text = Encoding.ASCII.GetString(pdf);
+            Require(text.StartsWith("%PDF-1.4\n", StringComparison.Ordinal) && text.EndsWith("%%EOF\n", StringComparison.Ordinal), "PDF header and trailer");
+            // Every xref entry must point at the start of its object, or viewers repair or reject the file.
+            int xref = int.Parse(Regex.Match(text, @"startxref\n(\d+)\n").Groups[1].Value, CultureInfo.InvariantCulture);
+            Require(text.Substring(xref, 4) == "xref", "PDF startxref offset");
+            var entries = Regex.Matches(text.Substring(xref), @"(\d{10}) 00000 n ");
+            Require(entries.Count == 5, "PDF object count");
+            for (int i = 0; i < entries.Count; i++) Require(text.Substring(int.Parse(entries[i].Groups[1].Value, CultureInfo.InvariantCulture)).StartsWith((i + 1) + " 0 obj\n", StringComparison.Ordinal), "PDF xref offset " + (i + 1));
+            Require(text.Contains("/MediaBox [0 0 842 473.63]"), "PDF page fits A4 landscape");
+            // The embedded image decompresses back to the exact pixels, and the zlib checksum is valid.
+            int start = text.IndexOf("/Subtype /Image", StringComparison.Ordinal); int data = text.IndexOf("stream\n", start, StringComparison.Ordinal) + 7;
+            int length = int.Parse(Regex.Match(text.Substring(start), @"/Length (\d+)").Groups[1].Value, CultureInfo.InvariantCulture);
+            var zlib = pdf.Skip(data).Take(length).ToArray();
+            Require(zlib[0] == 0x78 && (zlib[0] * 256 + zlib[1]) % 31 == 0, "zlib header");
+            byte[] inflated;
+            using (var input = new MemoryStream(zlib, 2, zlib.Length - 6)) using (var inflate = new System.IO.Compression.DeflateStream(input, System.IO.Compression.CompressionMode.Decompress)) using (var output = new MemoryStream()) { inflate.CopyTo(output); inflated = output.ToArray(); }
+            Require(inflated.SequenceEqual(pixels), "PDF image round trip");
+            uint a = 1, b = 0; foreach (byte value in pixels) { a = (a + value) % 65521; b = (b + a) % 65521; }
+            uint stored = (uint)(zlib[zlib.Length - 4] << 24 | zlib[zlib.Length - 3] << 16 | zlib[zlib.Length - 2] << 8 | zlib[zlib.Length - 1]);
+            Require(stored == ((b << 16) | a), "zlib Adler-32");
+            Require(ScreenShot.Pdf(300, 600, new byte[300 * 600 * 3]).Length > 0 && Encoding.ASCII.GetString(ScreenShot.Pdf(300, 600, new byte[300 * 600 * 3])).Contains("/MediaBox [0 0 421 842]"), "PDF page fits A4 portrait");
+            bool rejected = false; try { ScreenShot.Pdf(10, 10, new byte[5]); } catch (ArgumentException) { rejected = true; }
+            Require(rejected, "PDF rejects a mismatched pixel buffer");
+        }
         static int LateReadStatus(int port, string request) {
             using (var client = new TcpClient()) {
                 client.Connect(IPAddress.Loopback, port); client.ReceiveTimeout = 3000;
